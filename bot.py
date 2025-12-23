@@ -1,4 +1,5 @@
 import logging
+import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 from readability import Document
@@ -7,7 +8,7 @@ from lxml import etree
 import io
 
 # ВАЖНО: замени это на твой токен
-BOT_TOKEN = "8320529826:AAE_YQiSY3ti6Hb79NsLy49z_vFBCLzz85U"
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 
 # Логирование
 logging.basicConfig(
