@@ -80,8 +80,42 @@ def generate_fb2(title, content_html, source_url):
     return f"""<?xml version="1.0" encoding="utf-8"?>
 {xml_str}"""
 
+
+from telegram.ext import Application
+
+WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://your-bot.onrender.com") + "/webhook"
+
 if __name__ == '__main__':
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
-    app.run_polling()
+
+    import asyncio
+    from flask import Flask, request
+
+    app_web = Flask(__name__)
+
+    @app_web.route("/webhook", methods=["POST"])
+    def webhook():
+        asyncio.run(app.update_queue.put(Update.de_json(request.json, app.bot)))
+        return "OK"
+
+    @app_web.route("/")
+    def index():
+        return "FB2 Bot is running."
+
+    # Устанавливаем вебхук при запуске
+    async def set_webhook():
+        await app.bot.set_webhook(url=WEBHOOK_URL)
+
+    # Запуск вебхука
+    app.loop.run_until_complete(set_webhook())
+    app_web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
+
+
+
+
+
+
+
