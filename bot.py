@@ -4,56 +4,67 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 import trafilatura
 from lxml import etree
-from flask import Flask, request
 
-# Получаем токен из переменных окружения
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-PORT = int(os.environ.get("PORT", 10000))
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://fb29901190-bot.onrender.com")
-WEBHOOK_URL = RENDER_EXTERNAL_URL + "/webhook"
+# --- 1. НАСТРОЙКА И ЗАГРУЗКА ТОКЕНА ---
+# Получаем токен из переменных окружения Render
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    logging.error("ОШИБКА: Переменная окружения BOT_TOKEN не задана!")
+    exit(1)
 
-# Логирование
+# --- 2. НАСТРОЙКА ЛОГИРОВАНИЯ ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
-# Инициализация Telegram-приложения
-app = Application.builder().token(BOT_TOKEN).build()
-
+# --- 3. ФУНКЦИИ БОТА (остаются почти такими же, как у вас) ---
 async def start(update: Update, context):
-    await update.message.reply_text("Привет! Отправь ссылку на статью — я конвертирую её в FB2.")
+    """Обработчик команды /start"""
+    await update.message.reply_text("Привет! Отправь мне ссылку на статью в интернете, и я конвертирую её в электронную книгу в формате FB2.")
 
 async def handle_url(update: Update, context):
+    """Обработчик текстовых сообщений (ссылок)"""
     url = update.message.text.strip()
+    # Простая проверка на ссылку
     if not url.startswith(('http://', 'https://')):
-        await update.message.reply_text("Пожалуйста, отправь корректную ссылку.")
+        await update.message.reply_text("Пожалуйста, отправь корректную ссылку, начинающуюся с http:// или https://")
         return
 
+    # Сообщаем пользователю, что началась работа
+    wait_msg = await update.message.reply_text("⏳ Загружаю и обрабатываю статью...")
+
     try:
+        # Пытаемся скачать и извлечь текст
         downloaded = trafilatura.fetch_url(url)
         if not downloaded:
-            raise ValueError("Не удалось загрузить страницу.")
+            await update.message.reply_text("❌ Не удалось загрузить страницу по этой ссылке.")
+            await wait_msg.delete()
+            return
 
-        text = trafilatura.extract(
+        extracted = trafilatura.extract(
             downloaded,
             include_comments=False,
             output_format="xml",
             with_metadata=True
         )
-        if not text:
-            raise ValueError("Не удалось извлечь читаемый текст.")
+        if not extracted:
+            await update.message.reply_text("❌ Не удалось извлечь читаемый текст со страницы. Возможно, сайт защищен от копирования.")
+            await wait_msg.delete()
+            return
 
-        wrapper = f"<doc>{text}</doc>"
+        # Формируем XML и конвертируем в FB2
+        wrapper = f"<doc>{extracted}</doc>"
         tree = etree.fromstring(wrapper.encode("utf-8"))
 
         title_elem = tree.find(".//title")
         title = title_elem.text if title_elem is not None and title_elem.text else "Без названия"
+        # Очищаем название для имени файла
+        safe_filename = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        safe_filename = safe_filename[:30] if safe_filename else "book"
 
-        body_elem = tree.find(".//body")
-        if body_elem is None:
-            raise ValueError("Нет содержимого для конвертации.")
-
+        # Создаем структуру FB2
         fb2_root = etree.Element("FictionBook", xmlns="http://www.gribuser.ru/xml/fictionbook/2.0")
         desc = etree.SubElement(fb2_root, "description")
         title_info = etree.SubElement(desc, "title-info")
@@ -63,38 +74,43 @@ async def handle_url(update: Update, context):
         body = etree.SubElement(fb2_root, "body")
         section = etree.SubElement(body, "section")
 
-        for p in body_elem.xpath(".//p"):
-            para = etree.SubElement(section, "p")
-            para.text = (p.text or "").strip() or ""
+        # Переносим все абзацы <p> из извлеченного текста
+        for p in tree.xpath(".//p"):
+            para_text = (p.text or "").strip()
+            if para_text:  # Добавляем только непустые абзацы
+                para = etree.SubElement(section, "p")
+                para.text = para_text
 
+        # Генерируем итоговый файл
         fb2_bytes = etree.tostring(fb2_root, encoding="utf-8", xml_declaration=True, pretty_print=True)
-        filename = f"{title[:50]}.fb2".replace("/", "_").replace("\\", "_")
+        filename = f"{safe_filename}.fb2"
 
-        await update.message.reply_document(document=fb2_bytes, filename=filename)
+        # Удаляем сообщение "ждем" и отправляем файл
+        await wait_msg.delete()
+        await update.message.reply_document(
+            document=fb2_bytes,
+            filename=filename,
+            caption=f"Вот ваша книга: '{title}'"
+        )
+        logger.info(f"Успешно создан FB2: {filename} для ссылки: {url}")
 
     except Exception as e:
-        await update.message.reply_text(f"Ошибка: {str(e)[:200]}")
+        logger.error(f"Ошибка при обработке {url}: {e}")
+        await update.message.reply_text(f"⚠️ Произошла внутренняя ошибка при обработке ссылки: {str(e)[:150]}")
 
-# Регистрация обработчиков
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+# --- 4. ГЛАВНАЯ ФУНКЦИЯ ЗАПУСКА ---
+def main():
+    """Запускает бота в режиме polling"""
+    # Создаем приложение
+    application = Application.builder().token(BOT_TOKEN).build()
 
-# Flask-сервер
-flask_app = Flask(__name__)
+    # Регистрируем обработчики команд и сообщений
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
 
-@flask_app.route("/webhook", methods=["POST"])
-def webhook():
-    json_data = request.get_json()
-    if json_data is not None:
-        app.update_queue.put_nowait(Update.de_json(json_data, app.bot))
-    return "OK", 200
+    # ЗАПУСКАЕМ БОТА В РЕЖИМЕ ОПРОСА (POLLING)
+    logger.info("Бот запускается в режиме polling...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-@flask_app.route("/")
-def index():
-    return "FB2 Bot is running."
-
-# Установка вебхука и запуск
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(app.bot.set_webhook(url=WEBHOOK_URL))
-    flask_app.run(host="0.0.0.0", port=PORT)
+    main()
