@@ -1,7 +1,7 @@
 import logging
 import os
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandling
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 import trafilatura
 from lxml import etree
 from flask import Flask, request, jsonify
@@ -80,7 +80,7 @@ flask_app = Flask(__name__)
 @flask_app.route("/webhook", methods=["POST"])
 def telegram_webhook():
     json_data = request.get_json()
-    if json_
+    if json_:
         asyncio.run(app.update_queue.put(Update.de_json(json_data, app.bot)))
     return jsonify({"status": "ok"})
 
