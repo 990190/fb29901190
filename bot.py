@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import re
+import html
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 import trafilatura
@@ -47,7 +48,45 @@ async def handle_url(update: Update, context):
             await wait_msg.delete()
             return
 
-        # Извлечение текста
+        # --- ПРЯМОЕ ИЗВЛЕЧЕНИЕ ЗАГОЛОВКА ИЗ HTML ---
+        # Ищем заголовок в исходном HTML
+        title = "Статья"  # значение по умолчанию
+        
+        # Способ 1: Ищем <title> в HTML
+        title_match = re.search(r'<title[^>]*>(.*?)</title>', downloaded, re.IGNORECASE | re.DOTALL)
+        if title_match:
+            title = html.unescape(title_match.group(1).strip())
+        
+        # Способ 2: Ищем Open Graph заголовок
+        if title == "Статья":
+            og_match = re.search(r'<meta[^>]*property=["\']og:title["\'][^>]*content=["\'](.*?)["\']', downloaded, re.IGNORECASE)
+            if og_match:
+                title = html.unescape(og_match.group(1).strip())
+        
+        # Способ 3: Ищем h1 заголовок
+        if title == "Статья":
+            h1_match = re.search(r'<h1[^>]*>(.*?)</h1>', downloaded, re.IGNORECASE | re.DOTALL)
+            if h1_match:
+                # Удаляем HTML-теги внутри h1
+                h1_text = re.sub(r'<[^>]+>', '', h1_match.group(1))
+                title = html.unescape(h1_text.strip())
+        
+        # Очищаем заголовок для имени файла
+        # Удаляем переносы строк и лишние пробелы
+        title_clean = re.sub(r'\s+', ' ', title)
+        # Удаляем недопустимые символы для файлов
+        title_clean = re.sub(r'[<>:"/\\|?*]', '', title_clean)
+        # Обрезаем длину
+        if len(title_clean) > 50:
+            title_clean = title_clean[:47] + "..."
+        
+        # Если после очистки пусто
+        if not title_clean or title_clean.isspace():
+            title_clean = "Статья"
+            
+        filename = f"{title_clean}.fb2"
+
+        # Извлечение текста через trafilatura (для контента)
         extracted = trafilatura.extract(
             downloaded,
             include_comments=False,
@@ -62,45 +101,9 @@ async def handle_url(update: Update, context):
             await wait_msg.delete()
             return
 
-        # Создание XML
+        # Создание XML для контента
         wrapper = f"<doc>{extracted}</doc>"
         tree = etree.fromstring(wrapper.encode("utf-8"))
-
-        # --- УЛУЧШЕННОЕ ПОЛУЧЕНИЕ ЗАГОЛОВКА ---
-        # Пытаемся найти заголовок разными способами
-        title = "Без названия"
-        
-        # 1. Ищем в метаданных trafilatura
-        title_elem = tree.find(".//title")
-        if title_elem is not None and title_elem.text:
-            title = title_elem.text.strip()
-        
-        # 2. Если не нашли, ищем в метатегах HTML
-        if title == "Без названия":
-            meta_title = tree.find(".//meta[@property='og:title']")
-            if meta_title is not None and meta_title.get('content'):
-                title = meta_title.get('content').strip()
-        
-        # 3. Если всё ещё нет, ищем заголовок h1
-        if title == "Без названия":
-            h1_elem = tree.find(".//h1")
-            if h1_elem is not None and h1_elem.text:
-                title = h1_elem.text.strip()
-        
-        # Очищаем заголовок для имени файла
-        # Удаляем несколько пробелов/переносов на один пробел
-        title_clean = re.sub(r'\s+', ' ', title)
-        # Удаляем символы, недопустимые в именах файлов
-        title_clean = re.sub(r'[<>:"/\\|?*]', '', title_clean)
-        # Обрезаем до разумной длины (макс 50 символов)
-        if len(title_clean) > 50:
-            title_clean = title_clean[:47] + "..."
-        
-        # Если после очистки осталась пустая строка
-        if not title_clean:
-            title_clean = "Статья"
-        
-        filename = f"{title_clean}.fb2"
 
         # Создание FB2 структуры
         fb2_root = etree.Element(
@@ -110,7 +113,7 @@ async def handle_url(update: Update, context):
         
         desc = etree.SubElement(fb2_root, "description")
         title_info = etree.SubElement(desc, "title-info")
-        etree.SubElement(title_info, "book-title").text = title
+        etree.SubElement(title_info, "book-title").text = title  # Оригинальный заголовок
         etree.SubElement(title_info, "lang").text = "ru"
 
         body = etree.SubElement(fb2_root, "body")
@@ -139,10 +142,10 @@ async def handle_url(update: Update, context):
             caption=f"📖 {title_clean}"
         )
         
-        logger.info(f"Успешно создан FB2: {filename} для ссылки: {url}")
+        logger.info(f"Успешно создан FB2: {filename} (ориг: {title[:30]}...) для {url}")
 
     except Exception as e:
-        logger.error(f"Ошибка при обработке {url}: {e}")
+        logger.error(f"Ошибка при обработке {url}: {e}", exc_info=True)
         await update.message.reply_text(
             f"⚠️ Произошла внутренняя ошибка: {str(e)[:150]}"
         )
